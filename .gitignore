@@ -1,0 +1,44 @@
+# Environment & secrets
+.env
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# Logs
+logs/
+*.log
+
+# Cached market data (parquet files — large, date-specific)
+data/cache/
+
+# Database files & optimizer output
+data/*.db
+data/optuna.db
+data/best_params.json
+
+# Claude Code session data
+.claude/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Stray files
+=*
