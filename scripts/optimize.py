@@ -10,6 +10,12 @@ that the 30-day 99% Historical VaR on the full $180,000 portfolio stays
 below $15,000.  Trials that violate the VaR constraint receive a heavy
 penalty so Optuna learns to avoid them.
 
+Backtest window
+---------------
+2 years of daily OHLCV data for AMZN and CLF (downloaded via
+scripts/download_cache.py).  Only the two active strategies are included;
+SmallCapArb (IREN/WULF) is excluded from this backtest.
+
 Parameter search space
 ----------------------
 CLF Grid:
@@ -22,11 +28,6 @@ AMZN Reversion:
     BB_PERIOD     — Bollinger Band SMA period       [15, 30]
     RSI_ENTRY     — RSI oversold threshold          [20.0, 30.0]
     TAKE_PROFIT   — exit on this % gain             [0.02, 0.05]
-
-SmallCap Arb (IREN/WULF):
-    ZSCORE_ENTRY  — z-score entry threshold         [1.5, 3.0]
-    ZSCORE_EXIT   — z-score exit threshold          [0.3, 1.0]
-    HISTORY_DURATION — lookback for pair stats      ["10 D", "20 D", "30 D"]
 
 Usage
 -----
@@ -54,7 +55,6 @@ from optuna.samplers import TPESampler
 from core.backtester import BacktestConfig, BacktestEngine
 from strategies.clf_grid import CLFGridStrategy
 from strategies.amzn_reversion import AMZNReversionStrategy
-from strategies.smallcap_arb import SmallCapArbStrategy
 from utils.dashboard_stats import compute_calmar, compute_var_dollars
 
 # ── Constants ─────────────────────────────────────────────────────────────────
@@ -62,7 +62,8 @@ PORTFOLIO_VALUE  = 180_000.0
 VAR_LIMIT_USD    = 15_000.0       # 30-day 99% VaR must stay below this
 VAR_PENALTY_RATE = 10.0           # Calmar penalty per $1k of VaR overage
 WARMUP_BARS      = 120            # bars used to seed indicators before replay
-SYMBOLS          = ["CLF", "AMZN", "IREN", "WULF"]
+# 2-year backtest using only the two active strategies (AMZN + CLF).
+SYMBOLS          = ["CLF", "AMZN"]
 
 logging.basicConfig(
     level=logging.WARNING,   # suppress strategy chatter during optimisation
@@ -101,17 +102,6 @@ def objective(trial: optuna.Trial) -> float:
         "TAKE_PROFIT": trial.suggest_float("amzn_take_profit", 0.02, 0.05),
     }
 
-    # ── SmallCap Arb ───────────────────────────────────────────────────────
-    history_duration = trial.suggest_categorical(
-        "arb_history_duration", ["10 D", "20 D", "30 D"]
-    )
-    arb_params = {
-        "ZSCORE_ENTRY":      trial.suggest_float("arb_zscore_entry", 1.5, 3.0),
-        "ZSCORE_EXIT":       trial.suggest_float("arb_zscore_exit",  0.3, 1.0),
-        "HISTORY_DURATION":  history_duration,
-        "MIN_EVAL_SECS":     0.0,  # disable throttle so every bar is evaluated
-    }
-
     # ── Run backtest ───────────────────────────────────────────────────────
     config = BacktestConfig(
         initial_capital = PORTFOLIO_VALUE,
@@ -122,12 +112,11 @@ def objective(trial: optuna.Trial) -> float:
 
     try:
         result = engine.run(
-            strategies      = [CLFGridStrategy, AMZNReversionStrategy, SmallCapArbStrategy],
+            strategies      = [CLFGridStrategy, AMZNReversionStrategy],
             symbols         = SYMBOLS,
             strategy_params = {
                 "CLFGridStrategy":       clf_params,
                 "AMZNReversionStrategy": amzn_params,
-                "SmallCapArbStrategy":   arb_params,
             },
         )
     except FileNotFoundError as exc:
@@ -160,11 +149,10 @@ def objective(trial: optuna.Trial) -> float:
 
     _log.info(
         "Trial %4d | calmar=%.4f  var=$%,.0f  penalty=%.4f  score=%.4f | "
-        "clf_ratio=%.3f  amzn_rsi=%.1f  arb_z_entry=%.2f",
+        "clf_ratio=%.3f  amzn_rsi=%.1f",
         trial.number, calmar, var_usd, penalty, score,
         clf_params["GRID_RATIO"],
         amzn_params["RSI_ENTRY"],
-        arb_params["ZSCORE_ENTRY"],
     )
 
     # Store intermediate metrics for analysis
@@ -194,13 +182,11 @@ def dry_run() -> None:
     )
     engine = BacktestEngine(config)
     result = engine.run(
-        strategies = [CLFGridStrategy, AMZNReversionStrategy, SmallCapArbStrategy],
+        strategies = [CLFGridStrategy, AMZNReversionStrategy],
         symbols    = SYMBOLS,
-        strategy_params = {
-            "SmallCapArbStrategy": {"MIN_EVAL_SECS": 0.0},
-        },
     )
     print(result.summary())
+    result.plot_equity_curve(save_path=Path("data/backtest_equity.html"))
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -290,7 +276,7 @@ def _save_visualizations(study: optuna.Study) -> None:
             "optuna_importances.html": vis.plot_param_importances(study),
             "optuna_contour.html":     vis.plot_contour(
                 study,
-                params=["clf_grid_ratio", "amzn_rsi_entry", "arb_zscore_entry"],
+                params=["clf_grid_ratio", "amzn_rsi_entry"],
             ),
         }
         out_dir = Path("data")
@@ -320,8 +306,7 @@ def main() -> None:
 
     # Suppress ib_insync / strategy noise during parallel optimisation
     logging.getLogger("ib_insync").setLevel(logging.CRITICAL)
-    for name in ("CLFGridStrategy", "AMZNReversionStrategy",
-                 "SmallCapArbStrategy", "DataFetcher"):
+    for name in ("CLFGridStrategy", "AMZNReversionStrategy", "DataFetcher"):
         logging.getLogger(name).setLevel(logging.CRITICAL)
 
     sampler = TPESampler(seed=42)   # reproducible results

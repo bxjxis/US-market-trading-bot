@@ -451,6 +451,208 @@ class BacktestResult:
         eq.index = pd.to_datetime(eq.index)
         return eq.resample("1D").last().pct_change().dropna()
 
+    def plot_equity_curve(self, save_path=None) -> None:
+        """
+        Plot the equity curve and per-symbol trade markers.
+
+        Requires plotly (``pip install plotly``).  If plotly is not installed
+        the method falls back to a plain matplotlib PNG.  If neither library
+        is available the method prints a warning and returns without error.
+
+        Parameters
+        ----------
+        save_path : str or Path, optional
+            File path to write the chart.  The extension determines the
+            format: ``.html`` → interactive Plotly file (default when plotly
+            is available); ``.png`` / ``.svg`` → static image.
+            If *None*, the chart is shown in a window (matplotlib) or opened
+            in a browser (plotly).
+        """
+        if self.equity_curve.empty:
+            print("plot_equity_curve: no equity data to plot.")
+            return
+
+        from pathlib import Path as _Path
+        save_path = _Path(save_path) if save_path is not None else None
+
+        eq = self.equity_curve.copy()
+        eq["timestamp"] = pd.to_datetime(eq["timestamp"])
+
+        # ── Try plotly first ──────────────────────────────────────────────
+        try:
+            import plotly.graph_objects as go
+            from plotly.subplots import make_subplots
+
+            fig = make_subplots(
+                rows=2, cols=1,
+                shared_xaxes=True,
+                row_heights=[0.7, 0.3],
+                subplot_titles=("Portfolio Equity Curve (2-Year Backtest)", "Drawdown (%)"),
+                vertical_spacing=0.08,
+            )
+
+            # ── Equity line ───────────────────────────────────────────────
+            fig.add_trace(
+                go.Scatter(
+                    x=eq["timestamp"],
+                    y=eq["equity"],
+                    mode="lines",
+                    name="Equity",
+                    line=dict(color="#2196F3", width=1.5),
+                ),
+                row=1, col=1,
+            )
+
+            # ── Trade markers (BUY = green triangle-up, SELL = red triangle-down)
+            if not self.trade_log.empty:
+                tl = self.trade_log.copy()
+                # trade_log has no timestamp — merge on nearest equity row
+                if "timestamp" not in tl.columns:
+                    tl = tl.reset_index(drop=True)
+                    # Assign approximate timestamps by aligning to equity index
+                    step = max(1, len(eq) // max(len(tl), 1))
+                    tl["timestamp"] = [
+                        eq["timestamp"].iloc[min(i * step, len(eq) - 1)]
+                        for i in range(len(tl))
+                    ]
+                    tl["eq_price"] = [
+                        eq["equity"].iloc[min(i * step, len(eq) - 1)]
+                        for i in range(len(tl))
+                    ]
+
+                for action, color, symbol_marker in [
+                    ("BUY",  "#4CAF50", "triangle-up"),
+                    ("SELL", "#F44336", "triangle-down"),
+                ]:
+                    subset = tl[tl["action"] == action]
+                    if not subset.empty:
+                        fig.add_trace(
+                            go.Scatter(
+                                x=subset["timestamp"],
+                                y=subset.get("eq_price", [None] * len(subset)),
+                                mode="markers",
+                                name=action,
+                                marker=dict(
+                                    symbol=symbol_marker, size=8, color=color,
+                                    line=dict(width=1, color="white"),
+                                ),
+                                hovertext=[
+                                    f"{row['symbol']} {action} {row['qty']:.0f} @ ${row['price']:.2f}"
+                                    for _, row in subset.iterrows()
+                                ],
+                                hoverinfo="text+x",
+                            ),
+                            row=1, col=1,
+                        )
+
+            # ── Drawdown panel ────────────────────────────────────────────
+            equity_s = eq.set_index("timestamp")["equity"]
+            peak     = equity_s.cummax()
+            dd_pct   = (equity_s - peak) / peak * 100.0
+
+            fig.add_trace(
+                go.Scatter(
+                    x=dd_pct.index,
+                    y=dd_pct.values,
+                    mode="lines",
+                    fill="tozeroy",
+                    name="Drawdown",
+                    line=dict(color="#FF5722", width=1),
+                    fillcolor="rgba(255,87,34,0.2)",
+                ),
+                row=2, col=1,
+            )
+
+            # ── Layout ────────────────────────────────────────────────────
+            initial = self.config.initial_capital
+            final   = float(equity_s.iloc[-1])
+            pnl_pct = (final - initial) / initial * 100.0
+            fig.update_layout(
+                title=dict(
+                    text=(
+                        f"2-Year Backtest — AMZN + CLF | "
+                        f"P&L: {pnl_pct:+.1f}%  "
+                        f"(${initial:,.0f} → ${final:,.0f})"
+                    ),
+                    font=dict(size=14),
+                ),
+                height=600,
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+                hovermode="x unified",
+                plot_bgcolor="#FAFAFA",
+                paper_bgcolor="white",
+            )
+            fig.update_yaxes(title_text="Equity ($)", row=1, col=1, tickprefix="$")
+            fig.update_yaxes(title_text="Drawdown (%)", row=2, col=1, ticksuffix="%")
+            fig.update_xaxes(title_text="Date", row=2, col=1)
+
+            if save_path is not None:
+                save_path.parent.mkdir(parents=True, exist_ok=True)
+                if save_path.suffix == ".html":
+                    fig.write_html(str(save_path))
+                    print(f"  Equity chart saved → {save_path}")
+                else:
+                    fig.write_image(str(save_path))
+                    print(f"  Equity chart saved → {save_path}")
+            else:
+                fig.show()
+            return
+
+        except ImportError:
+            pass  # fall through to matplotlib
+
+        # ── Matplotlib fallback ───────────────────────────────────────────
+        try:
+            import matplotlib.pyplot as plt
+            import matplotlib.dates as mdates
+
+            fig, (ax1, ax2) = plt.subplots(
+                2, 1, figsize=(12, 7), sharex=True,
+                gridspec_kw={"height_ratios": [3, 1]},
+            )
+
+            ts  = eq["timestamp"]
+            eqv = eq["equity"]
+            ax1.plot(ts, eqv, color="#2196F3", linewidth=1.2, label="Equity")
+            ax1.axhline(
+                self.config.initial_capital, color="gray",
+                linestyle="--", linewidth=0.8, label="Initial capital",
+            )
+            ax1.set_ylabel("Equity ($)")
+            ax1.legend(loc="upper left", fontsize=8)
+            ax1.yaxis.set_major_formatter(
+                plt.FuncFormatter(lambda x, _: f"${x:,.0f}")
+            )
+            ax1.set_title("2-Year Backtest — AMZN + CLF | Equity Curve")
+            ax1.grid(True, alpha=0.3)
+
+            peak = eqv.cummax()
+            dd   = (eqv - peak) / peak * 100.0
+            ax2.fill_between(ts, dd, 0, color="#FF5722", alpha=0.4, label="Drawdown")
+            ax2.plot(ts, dd, color="#FF5722", linewidth=0.8)
+            ax2.set_ylabel("Drawdown (%)")
+            ax2.set_xlabel("Date")
+            ax2.grid(True, alpha=0.3)
+            ax2.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
+            fig.autofmt_xdate()
+            plt.tight_layout()
+
+            if save_path is not None:
+                save_path.parent.mkdir(parents=True, exist_ok=True)
+                plt.savefig(str(save_path), dpi=150, bbox_inches="tight")
+                print(f"  Equity chart saved → {save_path}")
+            else:
+                plt.show()
+            return
+
+        except ImportError:
+            pass
+
+        print(
+            "plot_equity_curve: neither plotly nor matplotlib is installed.  "
+            "Run: pip install plotly   or   pip install matplotlib"
+        )
+
     def summary(self) -> str:
         """Human-readable backtest summary."""
         from utils.dashboard_stats import (

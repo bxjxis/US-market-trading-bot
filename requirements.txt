@@ -8,5 +8,13 @@ pyarrow>=15.0.0
 optuna>=3.6.0
 sqlalchemy>=2.0.0
 
+# Optional: interactive charts (equity curve + Optuna visualisations)
+# pip install plotly
+# plotly>=5.0.0
+
+# Optional: static chart fallback when plotly is not available
+# pip install matplotlib
+# matplotlib>=3.7.0
+
 # Optional: PostgreSQL driver (uncomment if using PostgreSQL instead of SQLite)
 # psycopg2-binary>=2.9.0

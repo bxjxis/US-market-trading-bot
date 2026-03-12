@@ -12,13 +12,21 @@ Usage
     python scripts/download_cache.py
 
     # Custom duration or bar size
-    python scripts/download_cache.py --duration "30 D" --bar-size "1 min"
+    python scripts/download_cache.py --duration "1 Y" --bar-size "1 hour"
 
 Pre-requisites
 --------------
 * IBKR Gateway or TWS must be running and accepting API connections.
   Default: 127.0.0.1:7497  (paper trading port).
   Override with IB_HOST / IB_PORT / IB_CLIENT_ID env vars or a .env file.
+
+Defaults
+--------
+* Downloads 2 years of daily bars for AMZN and CLF (the two active strategies).
+* Daily bars ("1 day") are used so the full 2-year window fits in a single
+  IBKR request without hitting intraday pacing limits.
+* To get finer granularity (e.g. hourly), use --bar-size "1 hour" with a
+  shorter --duration such as "6 M" to stay within IBKR's per-request limits.
 """
 
 import argparse
@@ -44,11 +52,11 @@ _log = logging.getLogger("download_cache")
 _log.setLevel(logging.INFO)
 
 # ── Symbols to download ───────────────────────────────────────────────────────
+# Only AMZN and CLF are needed — the two active strategies in this bot.
+# (SmallCapArb / IREN / WULF are excluded from the 2-year backtest.)
 CONTRACTS = [
     Stock("AMZN", "SMART", "USD"),
     Stock("CLF",  "SMART", "USD"),
-    Stock("IREN", "SMART", "USD"),
-    Stock("WULF", "SMART", "USD"),
 ]
 
 # IBKR pacing: no more than 60 historical requests per 10-minute window.
@@ -111,15 +119,18 @@ def parse_args() -> argparse.Namespace:
         description="Download IBKR historical data into data/cache/ Parquet files."
     )
     parser.add_argument(
-        "--duration", default="20 D",
-        help="IBKR duration string (default: '20 D').  "
-             "Examples: '5 D', '1 M', '3 M'.",
+        "--duration", default="2 Y",
+        help="IBKR duration string (default: '2 Y').  "
+             "Examples: '6 M', '1 Y', '2 Y'.  "
+             "Note: for intraday bar sizes IBKR imposes per-request caps "
+             "(e.g. '6 M' max for '1 hour', '60 D' max for '30 mins').",
     )
     parser.add_argument(
-        "--bar-size", default="5 mins",
+        "--bar-size", default="1 day",
         dest="bar_size",
-        help="IBKR bar-size string (default: '5 mins').  "
-             "Examples: '1 min', '15 mins', '1 hour'.",
+        help="IBKR bar-size string (default: '1 day').  "
+             "Examples: '1 hour', '30 mins', '5 mins'.  "
+             "Use '1 day' for multi-year datasets to avoid pacing limits.",
     )
     return parser.parse_args()
 
