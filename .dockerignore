@@ -1,0 +1,28 @@
+# Never copy into the image
+.env
+.venv/
+.git/
+.claude/
+.gitignore
+
+# Runtime-generated, should be mounted as volumes
+logs/
+data/cache/
+data/*.db
+data/optuna.db
+data/best_params.json
+data/optuna_*.html
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+=*

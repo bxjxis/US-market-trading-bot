@@ -41,6 +41,8 @@ An automated trading system for US equities built on **Interactive Brokers** (IB
 ├── data/
 │   └── cache/                  # Parquet files (gitignored)
 │
+├── logs/                       # Rotating log files (gitignored)
+├── Dockerfile
 └── requirements.txt
 ```
 
@@ -110,6 +112,16 @@ python scripts/optimize.py --trials 100
 # Persistent study (resumable, supports parallel workers)
 python scripts/optimize.py --trials 500 --jobs 4 --storage sqlite:///data/optuna.db
 ```
+
+After the study completes, three interactive HTML charts are saved to `data/`:
+
+| File | Chart |
+|---|---|
+| `optuna_history.html` | Objective value across all trials |
+| `optuna_importances.html` | Parameter importance (fANOVA) — which knobs matter most |
+| `optuna_contour.html` | 2-D contour of grid ratio vs AMZN RSI vs arb z-score entry |
+
+Open any file directly in a browser — no server required. Requires `pip install plotly`.
 
 **Parameters tuned:**
 
@@ -240,6 +252,65 @@ s = CLFGridStrategy(ib, params={
 
 ---
 
+## Known Limitations
+
+### Gateway reconnection
+
+`IBConnection` retries the initial connection up to 3 times with a 5-second back-off. However, it does **not** automatically reconnect if the Gateway drops during live trading.
+
+IBKR Gateway restarts every **Sunday ~11:45 PM ET** for weekly maintenance, which will disconnect any running bot. The current workaround is a cron job or process manager (e.g. `supervisord`, `systemd`, or Docker `--restart=unless-stopped`) to relaunch `main.py` after the outage window. Full in-process reconnection logic is on the roadmap.
+
+### CLF Grid — price below all levels
+
+If CLF falls below every grid level (i.e. more than `SAFETY_PCT = 30%` from the anchor), no new buy orders are submitted by the safety switch and all existing GTC buy orders remain live. There is **no automatic stop-loss** — the strategy holds its filled positions and waits for a recovery. This is a deliberate choice for a grid strategy (mean-reversion assumption), but it means maximum drawdown is bounded only by the account size allocated to CLF. Set `ACCOUNT_SIZE` conservatively.
+
+### Slippage model for small-cap stocks
+
+The backtester uses a flat **0.1% slippage** on every fill. For liquid large-caps (AMZN) this is a reasonable assumption. For IREN and WULF — which can have wide bid/ask spreads and low 5-minute volumes — actual slippage during high-volatility periods may be 0.3%–1.0% or more. Backtest results for the SmallCap Arb strategy should be treated as an **upper bound** on real-world performance. When interpreting optimiser output, favour parameter sets with a comfortable margin over the VaR limit rather than the boundary-hugging optimum.
+
+---
+
+## Deployment (Docker)
+
+The `Dockerfile` packages the Python bot only. IBKR Gateway must run separately (natively or via a dedicated container) and be reachable at the configured host/port.
+
+```bash
+# Build
+docker build -t trading-bot .
+
+# Run — Gateway on the same host, logs and data persisted outside the container
+docker run -d \
+  --name trading-bot \
+  --restart unless-stopped \
+  --network host \
+  --env-file .env \
+  -v $(pwd)/logs:/app/logs \
+  -v $(pwd)/data:/app/data \
+  trading-bot
+
+# Follow logs
+docker logs -f trading-bot
+```
+
+`--restart unless-stopped` means Docker automatically relaunches the bot after the weekly Gateway restart (once Gateway is back up and accepting connections).
+
+---
+
+## Logging
+
+`main.py` writes to both stdout and a rotating file log:
+
+```
+logs/trading_bot.log        ← current file  (up to 10 MB)
+logs/trading_bot.log.1      ← previous
+...
+logs/trading_bot.log.7      ← oldest kept
+```
+
+Each strategy emits structured `INFO` lines for every bar evaluation, order placement, fill, and safety-switch state change — making post-session debugging straightforward without needing to query the database.
+
+---
+
 ## Dependencies
 
 | Package | Purpose |
@@ -250,3 +321,4 @@ s = CLFGridStrategy(ib, params={
 | `sqlalchemy` | Database ORM (SQLite / PostgreSQL) |
 | `optuna` | Bayesian hyperparameter optimisation |
 | `python-dotenv` | `.env` file loading |
+| `plotly` *(optional)* | Interactive HTML charts for optimisation results |

@@ -10,17 +10,27 @@ Usage:
 import asyncio
 import logging
 import sys
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 
 from core.connection import IBConnection
 from strategies import AMZNReversionStrategy, CLFGridStrategy, SmallCapArbStrategy
 
 # ── Logging setup ─────────────────────────────────────────────────────────────
+Path("logs").mkdir(exist_ok=True)   # ensure directory exists before opening file
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler("logs/trading_bot.log"),
+        # Rotate at 10 MB, keep 7 daily files — never fills the disk
+        RotatingFileHandler(
+            "logs/trading_bot.log",
+            maxBytes=10 * 1024 * 1024,
+            backupCount=7,
+            encoding="utf-8",
+        ),
     ],
 )
 logger = logging.getLogger(__name__)

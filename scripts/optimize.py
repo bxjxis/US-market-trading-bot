@@ -269,6 +269,48 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _save_visualizations(study: optuna.Study) -> None:
+    """
+    Save interactive HTML charts to data/ using Optuna's plotly backend.
+
+    Requires: pip install plotly
+    Opens automatically in any browser — no server needed.
+
+    Files produced
+    --------------
+    data/optuna_history.html     — objective value across all trials
+    data/optuna_importances.html — which parameters matter most (fANOVA)
+    data/optuna_contour.html     — 2-D contour of CLF ratio vs AMZN RSI
+    """
+    try:
+        import optuna.visualization as vis
+
+        plots = {
+            "optuna_history.html":     vis.plot_optimization_history(study),
+            "optuna_importances.html": vis.plot_param_importances(study),
+            "optuna_contour.html":     vis.plot_contour(
+                study,
+                params=["clf_grid_ratio", "amzn_rsi_entry", "arb_zscore_entry"],
+            ),
+        }
+        out_dir = Path("data")
+        out_dir.mkdir(exist_ok=True)
+        for filename, fig in plots.items():
+            path = out_dir / filename
+            fig.write_html(str(path))
+            _log.info("Saved visualisation → %s", path)
+
+        print(f"\n  Charts saved to data/  — open any .html file in a browser.")
+
+    except ImportError:
+        _log.warning(
+            "plotly not installed — skipping visualizations. "
+            "Run: pip install plotly"
+        )
+    except Exception as exc:
+        _log.warning("Could not generate visualizations: %s", exc)
+
+
 def main() -> None:
     args = parse_args()
 
@@ -323,6 +365,9 @@ def main() -> None:
             indent=2,
         )
     _log.info("Best params saved → %s", best_path)
+
+    # ── Interactive HTML visualizations (requires plotly) ──────────────────
+    _save_visualizations(study)
 
 
 if __name__ == "__main__":
