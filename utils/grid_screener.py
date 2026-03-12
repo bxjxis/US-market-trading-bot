@@ -33,6 +33,22 @@ adx_14
     Measures trend strength; lower ADX = more ranging market = safer for
     grid deployment.  Target: < 25.
 
+avg_volume_k
+    Mean daily share volume over the last 63 trading days, in thousands.
+    Hard constraint: must be ≥ 500 (i.e. 500 K shares / day).
+    Rationale: thinner markets mean grid limit orders move the price
+    against you, turning theoretical slippage into realised slippage.
+    A 500 K floor ensures the bot's orders stay well below 1 % of daily
+    liquidity even with a generous account allocation.
+
+last_price
+    Most recent closing price (USD).
+    Hard constraint: $5 ≤ price ≤ $500.
+    • Below $5 → penny-stock territory; IBKR per-share commission
+      ($0.0035/share) dominates the round-trip relative to the grid step.
+    • Above $500 → position sizing becomes very coarse for smaller
+      accounts (each grid level = large dollar jump per share).
+
 Scoring
 -------
 Each symbol is ranked 1..N on every metric (lower rank = better for grid):
@@ -42,13 +58,19 @@ Each symbol is ranked 1..N on every metric (lower rank = better for grid):
     rank_atr    by proximity to ideal band [1× step, 3× step]
     rank_adx    ascending  (lower ADX → rank 1)
 
+avg_volume_k and last_price are pure hard-gate constraints and do NOT
+contribute to rank scoring — once a stock passes the minimum threshold,
+higher volume / different price do not make it a better grid candidate.
+
 grid_score = sum of all rank columns (lower total = better grid candidate).
 
 viable flag
-    True when all hard constraints pass:
-      • beta < 1.0
+    True when ALL hard constraints pass:
+      • beta          < 1.0
       • atr_price_pct > (GRID_RATIO − 1) × 100   (grid can actually fill)
-      • adx_14 < 25                                (not a trending stock)
+      • adx_14        < 25                         (not a trending stock)
+      • avg_volume_k  ≥ 500                        (≥ 500 K shares / day)
+      • last_price    ∈ [$5, $500]                 (commission-efficient range)
 """
 
 import math
@@ -189,24 +211,67 @@ def compute_adx(ohlcv: pd.DataFrame, period: int = 14) -> float:
     return float(last.iloc[-1]) if not last.empty else float("nan")
 
 
+def compute_avg_volume_k(ohlcv: pd.DataFrame, window: int = 63) -> float:
+    """
+    Mean daily share volume over the last ``window`` trading days,
+    expressed in thousands (divide by 1000 for readability).
+
+    Hard constraint threshold: ≥ 500 (= 500 K shares / day).
+
+    Returns
+    -------
+    float — mean volume in thousands; nan if volume column is missing or empty.
+    """
+    if "volume" not in ohlcv.columns:
+        return float("nan")
+    vol = ohlcv["volume"].iloc[-window:].dropna()
+    if vol.empty:
+        return float("nan")
+    return float(vol.mean() / 1_000.0)
+
+
+def compute_last_price(ohlcv: pd.DataFrame) -> float:
+    """
+    Most recent closing price from the OHLCV DataFrame.
+
+    Hard constraint thresholds: $5 ≤ price ≤ $500.
+      • < $5  → per-share commission dominates grid profit
+      • > $500 → position sizing too coarse for small accounts
+
+    Returns
+    -------
+    float — last close price in USD; nan if DataFrame is empty.
+    """
+    if ohlcv.empty or "close" not in ohlcv.columns:
+        return float("nan")
+    return float(ohlcv["close"].iloc[-1])
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # Aggregate scoring
 # ═════════════════════════════════════════════════════════════════════════════
 
 def score_candidates(
-    records:    list,
-    grid_ratio: float = 1.015,
+    records:          list,
+    grid_ratio:       float = 1.015,
+    min_volume_k:     float = 500.0,
+    min_price:        float = 5.0,
+    max_price:        float = 500.0,
 ) -> pd.DataFrame:
     """
     Given a list of per-symbol metric dicts, produce a ranked DataFrame.
 
     Parameters
     ----------
-    records : List of dicts with keys:
-                symbol, beta, div_yield_pct, atr_cov, atr_price_pct, adx_14.
-              Missing or NaN values are handled gracefully.
-    grid_ratio : Geometric grid step (e.g. 1.015 = 1.5 % step).
-                 Used to compute the ATR viability threshold.
+    records       : List of dicts with keys:
+                      symbol, beta, div_yield_pct, atr_cov, atr_price_pct,
+                      adx_14, avg_volume_k, last_price.
+                    Missing or NaN values are handled gracefully.
+    grid_ratio    : Geometric grid step (e.g. 1.015 = 1.5 % step).
+                    Used to compute the ATR viability threshold.
+    min_volume_k  : Minimum average daily volume in thousands (default 500 K).
+    min_price     : Minimum close price in USD (default $5).
+    max_price     : Maximum close price in USD (default $500).
 
     Returns
     -------
@@ -231,12 +296,8 @@ def score_candidates(
     )
     # ATR/Price: rank by distance from ideal band centre
     df["_atr_dist"] = (df["atr_price_pct"] - ideal_atr_pct).abs()
-    df["rank_atr"] = df["_atr_dist"].rank(
-        ascending=True, na_option="bottom"
-    )
-    df["rank_adx"] = df["adx_14"].rank(
-        ascending=True, na_option="bottom"
-    )
+    df["rank_atr"]  = df["_atr_dist"].rank(ascending=True, na_option="bottom")
+    df["rank_adx"]  = df["adx_14"].rank(ascending=True, na_option="bottom")
 
     df["grid_score"] = (
         df["rank_beta"]
@@ -246,12 +307,19 @@ def score_candidates(
         + df["rank_adx"]
     )
 
-    # ── Hard viability constraints ─────────────────────────────────────────
-    # All three must be True for a stock to be considered safe to deploy
+    # ── Hard viability constraints (all five must pass) ────────────────────
     beta_ok  = df["beta"].lt(1.0).fillna(False)
     atr_ok   = df["atr_price_pct"].gt(step_pct).fillna(False)
     adx_ok   = df["adx_14"].lt(25.0).fillna(False)
-    df["viable"] = beta_ok & atr_ok & adx_ok
+    # Liquidity: ≥ min_volume_k thousand shares / day
+    vol_ok   = df["avg_volume_k"].ge(min_volume_k).fillna(False)
+    # Price in commission-efficient range [$min_price, $max_price]
+    price_ok = (
+        df["last_price"].ge(min_price).fillna(False)
+        & df["last_price"].le(max_price).fillna(False)
+    )
+
+    df["viable"] = beta_ok & atr_ok & adx_ok & vol_ok & price_ok
 
     # ── Clean up internal column ───────────────────────────────────────────
     df.drop(columns=["_atr_dist"], inplace=True)
@@ -264,61 +332,75 @@ def score_candidates(
 # ═════════════════════════════════════════════════════════════════════════════
 
 def print_screen_results(
-    df:         pd.DataFrame,
-    grid_ratio: float = 1.015,
-    top_n:      int   = 20,
+    df:           pd.DataFrame,
+    grid_ratio:   float = 1.015,
+    min_volume_k: float = 500.0,
+    min_price:    float = 5.0,
+    max_price:    float = 500.0,
+    top_n:        int   = 20,
 ) -> None:
     """
     Print a formatted screening results table.
 
     Parameters
     ----------
-    df         : Output of ``score_candidates()``.
-    grid_ratio : Used to label the viability threshold in the header.
-    top_n      : Maximum number of rows to display.
+    df           : Output of ``score_candidates()``.
+    grid_ratio   : Used to label the viability threshold in the header.
+    min_volume_k : Liquidity floor used to label the hard constraint.
+    min_price    : Price floor used to label the hard constraint.
+    max_price    : Price ceiling used to label the hard constraint.
+    top_n        : Maximum number of rows to display.
     """
     step_pct = (grid_ratio - 1.0) * 100.0
+    width    = 108
 
     header = (
-        f"\n{'═' * 90}\n"
+        f"\n{'═' * width}\n"
         f"  GRID TRADING CANDIDATE SCREEN  "
-        f"(grid step = {step_pct:.1f}%,  ATR viability threshold > {step_pct:.1f}%)\n"
-        f"{'═' * 90}\n"
+        f"(step={step_pct:.1f}%  |  ATR>{step_pct:.1f}%  |  "
+        f"Vol≥{min_volume_k:.0f}K/day  |  ${min_price:.0f}≤Price≤${max_price:.0f})\n"
+        f"{'═' * width}\n"
         f"  {'#':<3}  {'Symbol':<7}  "
+        f"{'Price':>7}  {'Vol(K)':>8}  "
         f"{'Beta':>6}  {'Div%':>6}  "
         f"{'ATR CoV':>8}  {'ATR/Px%':>8}  {'ADX':>6}  "
         f"{'Score':>6}  {'Viable':>7}\n"
-        f"{'─' * 90}"
+        f"{'─' * width}"
     )
     print(header)
+
+    def _fmt(val: float, fmt: str, na: str = "N/A") -> str:
+        return format(val, fmt) if not math.isnan(val) else na
 
     display = df.head(top_n)
     for rank, row in enumerate(display.itertuples(), start=1):
         viable_str = "  YES ✓" if row.viable else "   NO ✗"
-        div_str    = f"{row.div_yield_pct:6.2f}" if not math.isnan(row.div_yield_pct) else "   N/A"
-        beta_str   = f"{row.beta:6.3f}"          if not math.isnan(row.beta)          else "   N/A"
-        cov_str    = f"{row.atr_cov:8.3f}"       if not math.isnan(row.atr_cov)       else "     N/A"
-        atr_str    = f"{row.atr_price_pct:8.3f}" if not math.isnan(row.atr_price_pct) else "     N/A"
-        adx_str    = f"{row.adx_14:6.1f}"        if not math.isnan(row.adx_14)        else "   N/A"
-
         print(
             f"  {rank:<3}  {row.symbol:<7}  "
-            f"{beta_str}  {div_str}  "
-            f"{cov_str}  {atr_str}  {adx_str}  "
+            f"{_fmt(row.last_price,    '7.2f', '    N/A')}  "
+            f"{_fmt(row.avg_volume_k,  '8,.0f', '     N/A')}  "
+            f"{_fmt(row.beta,          '6.3f',  '   N/A')}  "
+            f"{_fmt(row.div_yield_pct, '6.2f',  '   N/A')}  "
+            f"{_fmt(row.atr_cov,       '8.3f',  '     N/A')}  "
+            f"{_fmt(row.atr_price_pct, '8.3f',  '     N/A')}  "
+            f"{_fmt(row.adx_14,        '6.1f',  '   N/A')}  "
             f"{row.grid_score:6.1f}  {viable_str}"
         )
 
     viable_syms = df[df["viable"]]["symbol"].tolist()
-    print(f"{'─' * 90}")
+    print(f"{'─' * width}")
     if viable_syms:
         print(f"\n  Viable candidates ({len(viable_syms)}): {', '.join(viable_syms)}")
     else:
         print("\n  No symbols passed all hard constraints with current market data.")
     print(
-        "\n  Metric guide:\n"
-        "    Beta     < 1.0  (low systematic risk)\n"
-        f"    ATR/Px%  > {step_pct:.1f}%  (oscillation covers grid step)\n"
-        "    ADX      < 25   (ranging market, not trending)\n"
+        "\n  Hard constraints (ALL must pass for 'viable'):\n"
+        f"    Beta     < 1.0           low systematic risk\n"
+        f"    ATR/Px%  > {step_pct:.1f}%         daily oscillation covers the grid step\n"
+        f"    ADX      < 25            ranging market, not trending\n"
+        f"    Vol      ≥ {min_volume_k:,.0f}K shares/day  sufficient liquidity for limit orders\n"
+        f"    Price    ${min_price:.0f} – ${max_price:.0f}         commission-efficient range\n"
+        "\n  Soft ranking (lower score = better grid candidate overall):\n"
         "    ATR CoV  lower = more stable daily oscillation rhythm\n"
-        "    Div%     higher = dividend provides a holding cost buffer\n"
+        "    Div%     higher = dividend buffer while holding stuck inventory\n"
     )

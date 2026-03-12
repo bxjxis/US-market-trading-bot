@@ -6,7 +6,7 @@ CLI tool to screen a universe of US equities for grid-trading suitability.
 What it computes
 ----------------
 For each symbol in the universe (and SPY as the market benchmark) the script
-fetches one year of daily OHLCV data and calculates five metrics defined in
+fetches one year of daily OHLCV data and calculates seven metrics defined in
 utils/grid_screener.py:
 
     beta          — systematic-risk coefficient vs SPY (252-day OLS)
@@ -14,11 +14,15 @@ utils/grid_screener.py:
     atr_cov       — ATR-14 Coefficient of Variation (std/mean, 63-day)
     atr_price_pct — mean ATR-14 / mean close × 100 (63-day)
     adx_14        — Average Directional Index (14-day)
+    avg_volume_k  — mean daily share volume over 63 days, in thousands
+    last_price    — most recent closing price (USD)
 
-Hard viability constraints (all must pass):
+Hard viability constraints (ALL must pass):
     beta          < 1.0
-    atr_price_pct > (GRID_RATIO − 1) × 100     e.g. > 1.5 % for default step
-    adx_14        < 25
+    atr_price_pct > (GRID_RATIO − 1) × 100     e.g. > 1.5 % for 1.5 % step
+    adx_14        < 25                           ranging market
+    avg_volume_k  ≥ 500                          ≥ 500 K shares / day
+    last_price    ∈ [$5, $500]                   commission-efficient range
 
 Data sources
 ------------
@@ -65,6 +69,8 @@ from utils.grid_screener import (
     compute_atr_cov,
     compute_atr_price_pct,
     compute_adx,
+    compute_avg_volume_k,
+    compute_last_price,
     score_candidates,
     print_screen_results,
 )
@@ -255,12 +261,18 @@ def _build_records(
         df  = ohlcv_map[sym]
         rec: Dict = {
             "symbol":        sym,
+            "last_price":    float("nan"),
+            "avg_volume_k":  float("nan"),
             "beta":          float("nan"),
             "div_yield_pct": div_yields.get(sym, float("nan")),
             "atr_cov":       float("nan"),
             "atr_price_pct": float("nan"),
             "adx_14":        float("nan"),
         }
+
+        # last_price and avg_volume_k require only the raw OHLCV columns
+        rec["last_price"]   = compute_last_price(df)
+        rec["avg_volume_k"] = compute_avg_volume_k(df)
 
         if bench_prices is not None:
             rec["beta"] = compute_beta(df["close"], bench_prices)
@@ -315,6 +327,25 @@ def parse_args() -> argparse.Namespace:
         help="Save results to a CSV file at this path.",
     )
     parser.add_argument(
+        "--min-volume", type=float, default=500.0, dest="min_volume_k",
+        metavar="K",
+        help=(
+            "Minimum average daily volume in thousands of shares "
+            "(default: 500, i.e. 500 K shares/day).  "
+            "Stocks below this threshold fail the liquidity hard constraint."
+        ),
+    )
+    parser.add_argument(
+        "--min-price", type=float, default=5.0, dest="min_price",
+        metavar="USD",
+        help="Minimum closing price in USD (default: $5).",
+    )
+    parser.add_argument(
+        "--max-price", type=float, default=500.0, dest="max_price",
+        metavar="USD",
+        help="Maximum closing price in USD (default: $500).",
+    )
+    parser.add_argument(
         "--top", type=int, default=20, metavar="N",
         help="Number of top candidates to display (default: 20).",
     )
@@ -362,10 +393,23 @@ def main() -> None:
         print("No data retrieved for any symbol.  Check your connection / symbols.")
         sys.exit(1)
 
-    ranked = score_candidates(records, grid_ratio=args.grid_ratio)
+    ranked = score_candidates(
+        records,
+        grid_ratio   = args.grid_ratio,
+        min_volume_k = args.min_volume_k,
+        min_price    = args.min_price,
+        max_price    = args.max_price,
+    )
 
     # ── Display ───────────────────────────────────────────────────────────
-    print_screen_results(ranked, grid_ratio=args.grid_ratio, top_n=args.top)
+    print_screen_results(
+        ranked,
+        grid_ratio   = args.grid_ratio,
+        min_volume_k = args.min_volume_k,
+        min_price    = args.min_price,
+        max_price    = args.max_price,
+        top_n        = args.top,
+    )
 
     # ── Optional CSV export ───────────────────────────────────────────────
     if args.output:
