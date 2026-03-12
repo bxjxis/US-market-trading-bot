@@ -16,5 +16,10 @@ sqlalchemy>=2.0.0
 # pip install matplotlib
 # matplotlib>=3.7.0
 
+# Optional: grid candidate screening (scripts/screen_grid_candidates.py)
+# Provides dividend-yield data and a fully offline data mode.
+# pip install yfinance
+# yfinance>=0.2.0
+
 # Optional: PostgreSQL driver (uncomment if using PostgreSQL instead of SQLite)
 # psycopg2-binary>=2.9.0
