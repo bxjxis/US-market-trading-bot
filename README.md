@@ -37,15 +37,10 @@ An automated trading system for US equities built on **Interactive Brokers** (IB
 │
 ├── scripts/
 │   ├── download_cache.py          # Download historical data from IBKR → parquet
-│   ├── optimize.py                # Optuna hyperparameter study (grid + arb)
-│   ├── backtest_grid.py           # Single-symbol grid backtest CLI
 │   ├── grid_screener.py           # IBKR scanner → ADX/RSI/Hurst score → CSV
-│   ├── drift_analysis.py          # Parameter sensitivity and drift detection
-│   ├── walk_forward.py            # Walk-forward IS/OOS validation (grid)
-│   ├── backtest_earnings.py       # Earnings momentum A/B backtest (yfinance)
-│   ├── optimize_earnings.py       # Optuna study for earnings strategy params
-│   ├── walk_forward_earnings.py   # Walk-forward validation for earnings strategy
-│   └── earnings_monitor.py        # Live upcoming-earnings alert monitor
+│   ├── backtest_grid.py           # Single-symbol grid backtest CLI
+│   ├── optimize.py                # Optuna hyperparameter study (grid + arb)
+│   └── walk_forward.py            # Walk-forward IS/OOS validation (grid)
 │
 ├── data/
 │   └── cache/                     # Parquet files (gitignored)
