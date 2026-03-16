@@ -58,7 +58,7 @@ PACING_DELAY_SECS = 3.0
 
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def _fetch(ib, duration: str, bar_size: str) -> None:
+async def _fetch(ib, duration: str, bar_size: str, symbols: list) -> None:
     """
     Async body: qualifies contracts and downloads data.
     Receives an already-connected IB instance so there is no
@@ -67,10 +67,11 @@ async def _fetch(ib, duration: str, bar_size: str) -> None:
     account = ib.managedAccounts()[0]
     _log.info("Connected | account=%s", account)
 
+    contracts = [Stock(s.upper(), "SMART", "USD") for s in symbols]
     print("Qualifying contracts …")
-    qualified = await ib.qualifyContractsAsync(*CONTRACTS)
-    if len(qualified) < len(CONTRACTS):
-        missing = {c.symbol for c in CONTRACTS} - {c.symbol for c in qualified}
+    qualified = await ib.qualifyContractsAsync(*contracts)
+    if len(qualified) < len(contracts):
+        missing = {c.symbol for c in contracts} - {c.symbol for c in qualified}
         print(f"  WARNING: could not qualify: {missing}  (skipping)")
 
     fetcher = DataFetcher(ib)
@@ -121,6 +122,12 @@ def parse_args() -> argparse.Namespace:
         help="IBKR bar-size string (default: '5 mins').  "
              "Examples: '1 min', '15 mins', '1 hour'.",
     )
+    parser.add_argument(
+        "--symbols", nargs="+", default=None,
+        metavar="SYM",
+        help="Symbols to download (default: AMZN CLF IREN WULF).  "
+             "Example: --symbols NVTS CTMX",
+    )
     return parser.parse_args()
 
 
@@ -138,7 +145,8 @@ if __name__ == "__main__":
     ib   = conn.connect()
 
     try:
-        ib_util.run(_fetch(ib, duration=args.duration, bar_size=args.bar_size))
+        symbols = args.symbols or [c.symbol for c in CONTRACTS]
+        ib_util.run(_fetch(ib, duration=args.duration, bar_size=args.bar_size, symbols=symbols))
     finally:
         conn.disconnect()
         _log.info("Disconnected.")

@@ -171,6 +171,8 @@ class SimulatedTicker:
     def __init__(self, contract, price: float = 0.0) -> None:
         self.contract    = contract
         self._price      = price
+        self.bar_high    = price   # current bar high (used by ADX filter)
+        self.bar_low     = price   # current bar low  (used by ADX filter)
         self.updateEvent = Event("updateEvent")
 
     def marketPrice(self) -> float:
@@ -307,6 +309,14 @@ class SimulatedIB:
             trade, _ = self._pending.pop(key)
             trade._cancel()
 
+    def cancel_all_pending(self) -> int:
+        """Cancel every pending order. Returns the number cancelled."""
+        count = len(self._pending)
+        for key in list(self._pending.keys()):
+            trade, _ = self._pending.pop(key)
+            trade._cancel()
+        return count
+
     # ── Simulation driver ─────────────────────────────────────────────────
 
     def advance_bar(self, symbol: str, bar: _Bar) -> None:
@@ -330,7 +340,9 @@ class SimulatedIB:
 
         ticker = self._tickers.get(symbol)
         if ticker is not None:
-            ticker._price = bar.close
+            ticker._price   = bar.close
+            ticker.bar_high = bar.high
+            ticker.bar_low  = bar.low
             ticker.updateEvent.emit(ticker)
 
     def _check_fills(self, symbol: str, bar: _Bar) -> None:
@@ -398,6 +410,7 @@ class BacktestConfig:
     portfolio_value: float = 180_000.0   # used for VaR dollar scaling
     warmup_bars:     int   = 100         # bars fed as initial history (seeds indicators)
     data_dir:        Path  = field(default_factory=lambda: Path("data/cache"))
+    drawdown_cap:    float = 0.0         # cancel all pending orders when DD > this fraction (0 = off)
 
 
 class BacktestResult:
@@ -552,12 +565,12 @@ class BacktestEngine:
                 f"No cache directory for '{symbol}' at {cache_dir}. "
                 "Run the live bot at least once to populate data/cache/."
             )
-        files = sorted(cache_dir.glob("*.parquet"))
+        files = sorted(cache_dir.glob("*.parquet"), key=lambda f: f.stat().st_mtime)
         if not files:
             raise FileNotFoundError(
                 f"No parquet files found for '{symbol}' in {cache_dir}."
             )
-        path = files[-1]  # most recent by filename (date-tagged)
+        path = files[-1]  # most recent by modification time
         _log.info("Loading %-6s from %s", symbol, path.name)
         df = pd.read_parquet(path)
         df["date"] = pd.to_datetime(df["date"])
@@ -608,11 +621,13 @@ class BacktestEngine:
         )
 
         # ── Replay loop ────────────────────────────────────────────────────
-        cash:        float           = self.config.initial_capital
-        holdings:    Dict[str, float] = {}   # symbol → net shares (+ long, − short)
-        last_prices: Dict[str, float] = {}
-        equity_log:  List[Dict]      = []
-        last_fill_idx: int           = 0
+        cash:          float           = self.config.initial_capital
+        holdings:      Dict[str, float] = {}   # symbol → net shares (+ long, − short)
+        last_prices:   Dict[str, float] = {}
+        equity_log:    List[Dict]      = []
+        last_fill_idx: int             = 0
+        peak_equity:   float           = self.config.initial_capital
+        dd_cap_hit:    bool            = False
 
         for _, row in timeline.iterrows():
             symbol = row["symbol"]
@@ -624,6 +639,17 @@ class BacktestEngine:
                 close=float(row["close"]),
                 volume=float(row["volume"]),
             )
+
+            # Always update price before any early-exit — keeps MtM accurate
+            last_prices[symbol] = bar.close
+
+            # If drawdown cap was hit, continue tracking mark-to-market but skip fills
+            if dd_cap_hit:
+                unrealised = sum(
+                    qty * last_prices.get(s, 0.0) for s, qty in holdings.items()
+                )
+                equity_log.append({"timestamp": bar.date, "equity": cash + unrealised})
+                continue
 
             # advance_bar: fills pending orders, fires bar/ticker events
             sim_ib.advance_bar(symbol, bar)
@@ -644,12 +670,24 @@ class BacktestEngine:
             last_fill_idx = len(sim_ib.trade_log)
 
             # Mark-to-market: equity = cash + unrealised position value
-            last_prices[symbol] = bar.close
             unrealised = sum(
-                qty * last_prices.get(sym, 0.0)
-                for sym, qty in holdings.items()
+                qty * last_prices.get(s, 0.0) for s, qty in holdings.items()
             )
-            equity_log.append({"timestamp": bar.date, "equity": cash + unrealised})
+            current_eq = cash + unrealised
+            equity_log.append({"timestamp": bar.date, "equity": current_eq})
+
+            # Drawdown cap: halt new fills once peak-to-trough DD exceeds threshold
+            if self.config.drawdown_cap > 0:
+                if current_eq > peak_equity:
+                    peak_equity = current_eq
+                elif (peak_equity > 0
+                      and (peak_equity - current_eq) / peak_equity > self.config.drawdown_cap):
+                    n = sim_ib.cancel_all_pending()
+                    dd_cap_hit = True
+                    _log.warning(
+                        "Drawdown cap %.1f%% hit (peak=%.2f current=%.2f) — %d pending orders cancelled.",
+                        self.config.drawdown_cap * 100, peak_equity, current_eq, n,
+                    )
 
         # ── Cleanup ────────────────────────────────────────────────────────
         for s in instances:

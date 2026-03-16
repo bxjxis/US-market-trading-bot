@@ -8,7 +8,8 @@ An automated trading system for US equities built on **Interactive Brokers** (IB
 
 | Strategy | Symbol(s) | Logic |
 |---|---|---|
-| **CLF Grid** | CLF (Cleveland-Cliffs) | Geometric grid — buy orders placed below anchor price at 1.5% intervals; each fill places a take-profit sell at `fill × GRID_RATIO`. 30% safety switch halts new orders on large price swings. |
+| **Grid (NVTS)** | Navitas Semiconductor | Geometric grid — buy orders placed below anchor at adaptive 0.7% intervals (ATR-scaled); each fill places a take-profit sell at `fill × GRID_RATIO`. 30% safety switch halts new orders on large swings. ATR-adaptive and event-calendar guard enabled. |
+| **Grid (TXG)** | 10x Genomics | Geometric grid — fixed 1.0% intervals; same fill/sell/safety logic. ATR-adaptive disabled (lower volatility regime). Event-calendar guard enabled. |
 | **AMZN Reversion** | AMZN | Mean-reversion — enters long when price breaks below the lower Bollinger Band (20-period) **and** RSI(14) < 25. Exits at the 20-period SMA or 3% take-profit. |
 | **SmallCap Arb** | IREN / WULF | Statistical arbitrage — trades the z-score of the IREN/WULF price ratio. Enters when \|z\| > 2.0, exits when \|z\| < 0.5. Dollar-neutral sizing with 1% market-impact cap. |
 
@@ -17,31 +18,39 @@ An automated trading system for US equities built on **Interactive Brokers** (IB
 ## Project Structure
 
 ```
-├── main.py                     # Entry point — runs all strategies live
+├── main.py                        # Entry point — runs all strategies live
 │
 ├── core/
-│   ├── connection.py           # IBConnection — Gateway/TWS lifecycle
-│   ├── backtester.py           # SimulatedIB + BacktestEngine (event-driven)
-│   └── database.py             # SQLite / PostgreSQL via SQLAlchemy
+│   ├── connection.py              # IBConnection — Gateway/TWS lifecycle
+│   ├── backtester.py              # SimulatedIB + BacktestEngine (event-driven)
+│   └── database.py                # SQLite / PostgreSQL via SQLAlchemy
 │
 ├── strategies/
-│   ├── base.py                 # BaseStrategy — abstract, shared order helpers
-│   ├── clf_grid.py             # CLF geometric grid
-│   ├── amzn_reversion.py       # AMZN BB + RSI mean-reversion
-│   └── smallcap_arb.py         # IREN/WULF z-score pairs trade
+│   ├── base.py                    # BaseStrategy — abstract, shared order helpers
+│   ├── clf_grid.py                # Geometric grid (multi-symbol via params)
+│   ├── amzn_reversion.py          # AMZN BB + RSI mean-reversion
+│   └── smallcap_arb.py            # IREN/WULF z-score pairs trade
 │
 ├── utils/
-│   ├── data_fetcher.py         # DataFetcher + IndicatorUtils, parquet cache
-│   └── dashboard_stats.py      # Sharpe, Sortino, Calmar, VaR
+│   ├── data_fetcher.py            # DataFetcher + IndicatorUtils, parquet cache
+│   └── dashboard_stats.py         # Sharpe, Sortino, Calmar, VaR
 │
 ├── scripts/
-│   ├── download_cache.py       # Download historical data from IBKR → parquet
-│   └── optimize.py             # Optuna hyperparameter study
+│   ├── download_cache.py          # Download historical data from IBKR → parquet
+│   ├── optimize.py                # Optuna hyperparameter study (grid + arb)
+│   ├── backtest_grid.py           # Single-symbol grid backtest CLI
+│   ├── grid_screener.py           # IBKR scanner → ADX/RSI/Hurst score → CSV
+│   ├── drift_analysis.py          # Parameter sensitivity and drift detection
+│   ├── walk_forward.py            # Walk-forward IS/OOS validation (grid)
+│   ├── backtest_earnings.py       # Earnings momentum A/B backtest (yfinance)
+│   ├── optimize_earnings.py       # Optuna study for earnings strategy params
+│   ├── walk_forward_earnings.py   # Walk-forward validation for earnings strategy
+│   └── earnings_monitor.py        # Live upcoming-earnings alert monitor
 │
 ├── data/
-│   └── cache/                  # Parquet files (gitignored)
+│   └── cache/                     # Parquet files (gitignored)
 │
-├── logs/                       # Rotating log files (gitignored)
+├── logs/                          # Rotating log files (gitignored)
 ├── Dockerfile
 └── requirements.txt
 ```
@@ -54,7 +63,7 @@ An automated trading system for US equities built on **Interactive Brokers** (IB
 - **IBKR Gateway** or **TWS** running and accepting API connections
   - Paper trading port: `7497`
   - Live trading port: `7496`
-- An active IBKR market data subscription covering AMZN, CLF, IREN, WULF
+- An active IBKR market data subscription covering NVTS, TXG, AMZN, IREN, WULF
 
 ---
 
@@ -89,9 +98,9 @@ Populates `data/cache/` with Parquet files used by the backtester and optimiser.
 Requires a live IBKR connection.
 
 ```bash
-python scripts/download_cache.py                        # default: 20 days, 5-min bars
-python scripts/download_cache.py --duration "30 D"      # longer history
-python scripts/download_cache.py --bar-size "1 min"     # finer resolution
+python scripts/download_cache.py                                    # default symbols, 20 days, 5-min bars
+python scripts/download_cache.py --symbols NVTS TXG --duration "90 D"
+python scripts/download_cache.py --bar-size "1 min"                 # finer resolution
 ```
 
 ### 2 — Validate the pipeline
@@ -102,7 +111,33 @@ Runs a single backtest with default parameters to confirm everything is wired up
 python scripts/optimize.py --dry-run
 ```
 
-### 3 — Optimise hyperparameters
+### 3 — Screen for new grid symbols
+
+Connects to IBKR and scores candidates from the MOST_ACTIVE scanner using ADX, ATR%, Hurst exponent, volume, and price range. Requires a live IBKR connection during market hours.
+
+```bash
+python scripts/grid_screener.py                              # default: MOST_ACTIVE, $5–$50
+python scripts/grid_screener.py --scan-code HOT_BY_PRICE_RANGE --min-price 10 --max-price 100
+```
+
+### 4 — Backtest a grid symbol
+
+Validates a screener candidate against 90-day historical data before adding it to `main.py`.
+
+```bash
+python scripts/backtest_grid.py --symbol NVTS --grid-ratio 1.007 --levels 20 --account-size 45000
+python scripts/backtest_grid.py --symbol TXG  --grid-ratio 1.010 --levels 15 --account-size 45000
+```
+
+### 5 — Walk-forward validation
+
+Tests whether optimised parameters generalise out-of-sample (IS→OOS Sharpe ratio ≥ 0.70).
+
+```bash
+python scripts/walk_forward.py --symbol NVTS --adx-tiered --atr-adaptive --trials 50 --jobs 4
+```
+
+### 6 — Optimise hyperparameters
 
 Runs an Optuna study that maximises the **Calmar Ratio** subject to a 30-day 99% VaR constraint of **< $15,000** on the full $180,000 portfolio.
 
@@ -127,9 +162,9 @@ Open any file directly in a browser — no server required. Requires `pip instal
 
 | Strategy | Parameter | Range |
 |---|---|---|
-| CLF Grid | `GRID_RATIO` | 1.010 – 1.030 |
-| CLF Grid | `NUM_BUY_LEVELS` | 6 – 15 |
-| CLF Grid | `ACCOUNT_SIZE` | $36k – $108k |
+| Grid | `GRID_RATIO` | 1.003 – 1.025 |
+| Grid | `NUM_BUY_LEVELS` | 5 – 25 |
+| Grid | `ACCOUNT_SIZE` | $36k – $108k |
 | AMZN | `BB_PERIOD` | 15 – 30 |
 | AMZN | `RSI_ENTRY` | 20 – 30 |
 | AMZN | `TAKE_PROFIT` | 2% – 5% |
@@ -137,7 +172,7 @@ Open any file directly in a browser — no server required. Requires `pip instal
 | SmallCap Arb | `ZSCORE_EXIT` | 0.3 – 1.0 |
 | SmallCap Arb | `HISTORY_DURATION` | 10 D / 20 D / 30 D |
 
-### 4 — Run live trading
+### 7 — Run live trading
 
 ```bash
 python main.py
@@ -206,20 +241,28 @@ from strategies.clf_grid import CLFGridStrategy
 
 # Custom parameters for a backtest run
 s = CLFGridStrategy(ib, params={
-    "GRID_RATIO":     1.02,
-    "NUM_BUY_LEVELS": 8,
-    "ACCOUNT_SIZE":   72_000,
+    "SYMBOL":         "NVTS",
+    "GRID_RATIO":     1.007,
+    "NUM_BUY_LEVELS": 20,
+    "ACCOUNT_SIZE":   45_000,
+    "ATR_ADAPTIVE":   True,
+    "EVENT_GUARD":    True,
 })
 ```
 
-**CLF Grid defaults:**
+**Grid defaults:**
 
 | Parameter | Default | Description |
 |---|---|---|
-| `GRID_RATIO` | `1.015` | Geometric step between grid levels (1.5%) |
+| `SYMBOL` | `"CLF"` | Ticker symbol (override per instance) |
+| `GRID_RATIO` | `1.015` | Geometric step between grid levels |
 | `SAFETY_PCT` | `0.30` | Halt new orders if price deviates > 30% from anchor |
-| `ACCOUNT_SIZE` | `1_000` | USD allocated to this strategy |
+| `ACCOUNT_SIZE` | `1_000` | USD allocated to this strategy instance |
 | `NUM_BUY_LEVELS` | `10` | Number of buy levels below anchor |
+| `ATR_ADAPTIVE` | `False` | Widen grid ratio when ATR > long-term ATR (Guasoni) |
+| `ATR_WIDEN_MAX` | `1.8` | Maximum ATR multiplier cap for adaptive widening |
+| `ATR_LONG_PERIOD` | `50` | Bars for long-term ATR baseline |
+| `EVENT_GUARD` | `False` | Pause new orders on earnings / ex-dividend days |
 
 **AMZN Reversion defaults:**
 
@@ -244,7 +287,7 @@ s = CLFGridStrategy(ib, params={
 
 ## Risk Controls
 
-- **CLF Safety Switch** — no new grid orders when price deviates > 30% from the anchor; resets automatically when price returns to the band.
+- **Grid Safety Switch** — no new grid orders when price deviates > 30% from the anchor; resets automatically when price returns to the band.
 - **SmallCap Market Impact Cap** — each leg capped at 1% of average 5-minute volume.
 - **Dollar-Neutral Sizing** — IREN and WULF notional values are matched on every entry.
 - **VaR Constraint** — optimiser objective penalises parameter sets where the 30-day 99% VaR exceeds $15,000 on the $180k portfolio.
@@ -260,9 +303,9 @@ s = CLFGridStrategy(ib, params={
 
 IBKR Gateway restarts every **Sunday ~11:45 PM ET** for weekly maintenance, which will disconnect any running bot. The current workaround is a cron job or process manager (e.g. `supervisord`, `systemd`, or Docker `--restart=unless-stopped`) to relaunch `main.py` after the outage window. Full in-process reconnection logic is on the roadmap.
 
-### CLF Grid — price below all levels
+### Grid — price below all levels
 
-If CLF falls below every grid level (i.e. more than `SAFETY_PCT = 30%` from the anchor), no new buy orders are submitted by the safety switch and all existing GTC buy orders remain live. There is **no automatic stop-loss** — the strategy holds its filled positions and waits for a recovery. This is a deliberate choice for a grid strategy (mean-reversion assumption), but it means maximum drawdown is bounded only by the account size allocated to CLF. Set `ACCOUNT_SIZE` conservatively.
+If a symbol falls below every grid level (more than `SAFETY_PCT = 30%` from the anchor), no new buy orders are submitted and all existing GTC buy orders remain live. There is **no automatic stop-loss** — the strategy holds filled positions and waits for recovery. This is deliberate (mean-reversion assumption), but maximum drawdown is bounded only by `ACCOUNT_SIZE`. Set it conservatively and use the screener's Hurst < 0.55 filter to select mean-reverting candidates.
 
 ### Slippage model for small-cap stocks
 

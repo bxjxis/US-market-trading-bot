@@ -35,10 +35,34 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# ── Active grid configurations ─────────────────────────────────────────────────
+# Each entry overrides CLFGridStrategy module-level defaults for that instance.
+# Validated via 90-day backtest; see scripts/backtest_grid.py for reproduction.
+_GRID_CONFIGS = [
+    {
+        "SYMBOL":         "NVTS",
+        "GRID_RATIO":     1.007,
+        "NUM_BUY_LEVELS": 20,
+        "ACCOUNT_SIZE":   45_000,
+        "ATR_ADAPTIVE":   True,
+        "EVENT_GUARD":    True,
+    },
+    {
+        "SYMBOL":         "TXG",
+        "GRID_RATIO":     1.010,
+        "NUM_BUY_LEVELS": 15,
+        "ACCOUNT_SIZE":   45_000,
+        "ATR_ADAPTIVE":   False,
+        "EVENT_GUARD":    True,
+    },
+]
+
 
 async def run_strategies(ib, account: str) -> None:
     strategies = [
-        CLFGridStrategy(ib, account=account),
+        # Grid strategies — one instance per configured symbol
+        *[CLFGridStrategy(ib, account=account, params=cfg) for cfg in _GRID_CONFIGS],
+        # Other strategies
         AMZNReversionStrategy(ib, account=account),
         SmallCapArbStrategy(ib, account=account),
     ]

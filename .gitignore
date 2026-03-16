@@ -40,5 +40,8 @@ data/best_params.json
 .DS_Store
 Thumbs.db
 
+# Screener output CSVs
+data/*.csv
+
 # Stray files
 =*
