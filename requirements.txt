@@ -8,5 +8,8 @@ pyarrow>=15.0.0
 optuna>=3.6.0
 sqlalchemy>=2.0.0
 
+# SPY benchmark comparison
+yfinance>=0.2.0
+
 # Optional: PostgreSQL driver (uncomment if using PostgreSQL instead of SQLite)
 # psycopg2-binary>=2.9.0
